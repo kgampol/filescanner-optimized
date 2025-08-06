@@ -1,0 +1,14 @@
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\bin\Debug\net9.0\FileScanner.exe
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\bin\Debug\net9.0\FileScanner.deps.json
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\bin\Debug\net9.0\FileScanner.runtimeconfig.json
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\bin\Debug\net9.0\FileScanner.dll
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\bin\Debug\net9.0\FileScanner.pdb
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\obj\Debug\net9.0\FileScanner.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\obj\Debug\net9.0\FileScanner.AssemblyInfoInputs.cache
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\obj\Debug\net9.0\FileScanner.AssemblyInfo.cs
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\obj\Debug\net9.0\FileScanner.csproj.CoreCompileInputs.cache
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\obj\Debug\net9.0\FileScanner.dll
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\obj\Debug\net9.0\refint\FileScanner.dll
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\obj\Debug\net9.0\FileScanner.pdb
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\obj\Debug\net9.0\FileScanner.genruntimeconfig.cache
+C:\Users\karat\OneDrive - PennO365\Projects\ServerFinder\FileScanner\obj\Debug\net9.0\ref\FileScanner.dll
