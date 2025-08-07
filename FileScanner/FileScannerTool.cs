@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 
 namespace FileScanner;
 
@@ -27,6 +28,9 @@ public class FileScannerTool
             throw new DirectoryNotFoundException($"Root path '{_rootPath}' does not exist.");//DirectoryNotFoundException is a exception that is thrown when a directory is not found
         }
 
+        var stopwatch = Stopwatch.StartNew();
+        Console.WriteLine($"Scanning started at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        
         // Use a queue (BFS) to avoid stack overflow for deep trees.
         var dirs = new Queue<string>();//Queue is a collection that stores a first-in, first-out (FIFO) collection of objects
         dirs.Enqueue(_rootPath);//Enqueue is a method that adds an object to the end of the Queue
@@ -34,6 +38,10 @@ public class FileScannerTool
         while (dirs.Count > 0)//while is a loop that runs while a condition is true
         {
             string currentDir = dirs.Dequeue();//Dequeue is a method that removes and returns the object at the beginning of the Queue
+            
+            // Display current folder and elapsed time
+            Console.Write($"\r[{stopwatch.Elapsed:hh\\:mm\\:ss}] Processing: {currentDir}".PadRight(Console.WindowWidth - 1));
+            Console.Out.Flush();
             IEnumerable<string> subDirs = Enumerable.Empty<string>();//Enumerable.Empty is a method that returns an empty sequence
             IEnumerable<string> files = Enumerable.Empty<string>();//Enumerable.Empty is a method that returns an empty sequence
             try
@@ -75,6 +83,9 @@ public class FileScannerTool
                 }
             }
         }
+        
+        stopwatch.Stop();
+        Console.WriteLine($"\nScanning completed in {stopwatch.Elapsed:hh\\:mm\\:ss}");
     }
 
     private bool MatchesFilters(string filePath)//MatchesFilters is a method that checks if a file matches the filters
