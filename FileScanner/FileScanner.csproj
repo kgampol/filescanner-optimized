@@ -5,6 +5,8 @@
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- Use optimized program as entry point -->
+    <StartupObject>FileScannerApp.OptimizedProgram</StartupObject>
   </PropertyGroup>
 
 </Project>
