@@ -6,8 +6,8 @@ using System.Threading.Channels;
 namespace FileScanner;
 
 /// <summary>
-/// Network-optimized scanner with BFS traversal to prevent stack overflow.
-/// Maintains constant network utilization for large server scanning.
+/// Hybrid depth-limited scanner optimized for extremely deep directory structures.
+/// Uses BFS with circuit breakers to handle 300k+ files efficiently.
 /// </summary>
 public class NetworkOptimizedScanner
 {
@@ -16,19 +16,25 @@ public class NetworkOptimizedScanner
     private readonly HashSet<string> _extensionFilter;
     private readonly int _networkConcurrency;
     private readonly int _bufferSize;
+    private readonly int _maxDepth;
+    private readonly int _maxQueueSize;
     
     // Network monitoring
     private long _networkRequestsPerSecond;
     private long _totalNetworkRequests;
     private long _totalFilesFound;
     private long _totalDirectoriesProcessed;
+    private long _deepDirectoriesProcessed;
+    private volatile bool _useSequentialMode = false;
     
     public NetworkOptimizedScanner(
         string rootPath, 
         string? nameContains = null, 
         IEnumerable<string>? extensionFilter = null,
-        int networkConcurrency = 50,
-        int bufferSize = 100000)
+        int networkConcurrency = 100,
+        int bufferSize = 200000,
+        int maxDepth = 50,
+        int maxQueueSize = 10000)
     {
         _rootPath = rootPath;
         _nameContains = string.IsNullOrWhiteSpace(nameContains) ? null : nameContains;
@@ -37,6 +43,8 @@ public class NetworkOptimizedScanner
             : new HashSet<string>();
         _networkConcurrency = networkConcurrency;
         _bufferSize = bufferSize;
+        _maxDepth = maxDepth;
+        _maxQueueSize = maxQueueSize;
     }
 
     public async IAsyncEnumerable<FileEntry> ScanAsync([EnumeratorCancellation] CancellationToken cancellationToken = default)
@@ -48,7 +56,7 @@ public class NetworkOptimizedScanner
 
         var stopwatch = Stopwatch.StartNew();
         Console.WriteLine($"Network-optimized BFS scanning started at {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-        Console.WriteLine($"Config: Concurrency={_networkConcurrency}, Buffer={_bufferSize:N0}");
+        Console.WriteLine($"Config: Concurrency={_networkConcurrency}, Buffer={_bufferSize:N0}, MaxDepth={_maxDepth}, MaxQueue={_maxQueueSize:N0}");
 
         // Large network buffer for continuous streaming
         var networkBuffer = Channel.CreateBounded<FileEntry>(new BoundedChannelOptions(_bufferSize)
@@ -58,12 +66,12 @@ public class NetworkOptimizedScanner
             SingleWriter = false
         });
 
-        // BFS directory queue - NO RECURSION, breadth-first only
-        var directoryQueue = new ConcurrentQueue<string>();
-        var discoveredDirectories = Channel.CreateUnbounded<string>();
+        // BFS directory queue with depth tracking
+        var directoryQueue = new ConcurrentQueue<(string path, int depth)>();
+        var discoveredDirectories = Channel.CreateUnbounded<(string path, int depth)>();
         
-        // Start with root directory
-        directoryQueue.Enqueue(_rootPath);
+        // Start with root directory at depth 0
+        directoryQueue.Enqueue((_rootPath, 0));
         
         var activeNetworkTasks = 0;
         var scanningComplete = false;
@@ -71,12 +79,30 @@ public class NetworkOptimizedScanner
         // Network statistics monitoring
         var statsTask = StartNetworkMonitoring(stopwatch, cancellationToken);
 
-        // Directory discovery task (BFS level management)
+        // Directory discovery task with queue size monitoring
         var discoveryTask = Task.Run(async () =>
         {
             await foreach (var newDir in discoveredDirectories.Reader.ReadAllAsync(cancellationToken))
             {
-                directoryQueue.Enqueue(newDir);
+                // Circuit breaker: Monitor queue size and memory pressure
+                if (directoryQueue.Count > _maxQueueSize)
+                {
+                    Console.WriteLine($"\nQueue size exceeded {_maxQueueSize:N0}, switching to sequential mode");
+                    _useSequentialMode = true;
+                    
+                    // Process overflow directories sequentially to prevent memory explosion
+                    await ProcessDeepDirectorySequential(newDir.path, newDir.depth, networkBuffer.Writer, cancellationToken);
+                }
+                else if (GC.GetTotalMemory(false) > 1_000_000_000) // 1GB memory pressure
+                {
+                    Console.WriteLine($"\nMemory pressure detected, switching to sequential mode");
+                    _useSequentialMode = true;
+                    await ProcessDeepDirectorySequential(newDir.path, newDir.depth, networkBuffer.Writer, cancellationToken);
+                }
+                else
+                {
+                    directoryQueue.Enqueue(newDir);
+                }
             }
         }, cancellationToken);
 
@@ -89,19 +115,19 @@ public class NetworkOptimizedScanner
                 
                 while (!cancellationToken.IsCancellationRequested && !scanningComplete)
                 {
-                    if (directoryQueue.TryDequeue(out var directory))
+                    if (directoryQueue.TryDequeue(out var directoryItem))
                     {
                         Interlocked.Increment(ref activeNetworkTasks);
                         try
                         {
                             processedDirs++;
-                            await ProcessDirectoryBFS(directory, networkBuffer.Writer, discoveredDirectories.Writer, cancellationToken);
+                            await ProcessDirectoryBFS(directoryItem.path, directoryItem.depth, networkBuffer.Writer, discoveredDirectories.Writer, cancellationToken);
                             Interlocked.Increment(ref _totalDirectoriesProcessed);
                         }
                         catch (Exception ex)
                         {
                             // Log but don't stop - network resilience
-                            Console.WriteLine($"\n{worker} error in {directory}: {ex.Message}");
+                            Console.WriteLine($"\n{worker} error in {directoryItem.path}: {ex.Message}");
                         }
                         finally
                         {
@@ -156,7 +182,8 @@ public class NetworkOptimizedScanner
             if ((now - lastProgressUpdate).TotalMilliseconds > 500)
             {
                 var bufferUsage = GetBufferUsagePercent();
-                Console.Write($"\r[{stopwatch.Elapsed:hh\\:mm\\:ss}] Files: {_totalFilesFound:N0} | Dirs: {_totalDirectoriesProcessed:N0} | Buffer: {bufferUsage:F1}% | Net Req/s: {_networkRequestsPerSecond:N0} | Active: {activeNetworkTasks}     ");
+                var mode = _useSequentialMode ? "SEQUENTIAL" : "PARALLEL";
+                Console.Write($"\r[{stopwatch.Elapsed:hh\\:mm\\:ss}] Files: {_totalFilesFound:N0} | Dirs: {_totalDirectoriesProcessed:N0} | Deep: {_deepDirectoriesProcessed:N0} | Mode: {mode} | Queue: {directoryQueue.Count:N0} | Active: {activeNetworkTasks}     ");
                 lastProgressUpdate = now;
             }
         }
@@ -165,20 +192,29 @@ public class NetworkOptimizedScanner
         
         stopwatch.Stop();
         Console.WriteLine($"\nBFS Network scanning completed in {stopwatch.Elapsed:hh\\:mm\\:ss}");
-        Console.WriteLine($"Files found: {_totalFilesFound:N0} | Directories processed: {_totalDirectoriesProcessed:N0}");
+        Console.WriteLine($"Files found: {_totalFilesFound:N0} | Directories processed: {_totalDirectoriesProcessed:N0} | Deep directories: {_deepDirectoriesProcessed:N0}");
         Console.WriteLine($"Network requests: {_totalNetworkRequests:N0} | Avg req/sec: {_totalNetworkRequests / stopwatch.Elapsed.TotalSeconds:F1}");
+        if (_useSequentialMode) Console.WriteLine("Sequential mode was activated for deep directory structures");
     }
 
     private async Task ProcessDirectoryBFS(
         string directory, 
+        int depth,
         ChannelWriter<FileEntry> fileWriter,
-        ChannelWriter<string> directoryWriter,
+        ChannelWriter<(string path, int depth)> directoryWriter,
         CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _totalNetworkRequests);
         
         try
         {
+            // Depth circuit breaker: Stop BFS if too deep
+            if (depth >= _maxDepth)
+            {
+                await ProcessDeepDirectorySequential(directory, depth, fileWriter, cancellationToken);
+                return;
+            }
+
             // BFS: Discover subdirectories first (breadth-first expansion)
             var subdirTask = Task.Run(async () =>
             {
@@ -187,8 +223,8 @@ public class NetworkOptimizedScanner
                     var subdirectories = Directory.EnumerateDirectories(directory);
                     foreach (var subdir in subdirectories)
                     {
-                        // Add to QUEUE (not recursive call) - this is BFS!
-                        await directoryWriter.WriteAsync(subdir, cancellationToken);
+                        // Add to QUEUE with depth tracking - this is BFS!
+                        await directoryWriter.WriteAsync((subdir, depth + 1), cancellationToken);
                     }
                 }
                 catch (UnauthorizedAccessException) { }
@@ -243,7 +279,7 @@ public class NetworkOptimizedScanner
         try
         {
             var fileInfo = new FileInfo(filePath);
-            var entry = new FileEntry(fileInfo.FullName, fileInfo.Length, fileInfo.LastWriteTimeUtc);
+            var entry = FileEntry.FromFileInfo(fileInfo);
             
             await writer.WriteAsync(entry, cancellationToken);
         }
@@ -299,5 +335,54 @@ public class NetworkOptimizedScanner
                 lastRequests = currentRequests;
             }
         }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Sequential processing for extremely deep directory structures to prevent memory explosion
+    /// </summary>
+    private async Task ProcessDeepDirectorySequential(
+        string directory,
+        int depth,
+        ChannelWriter<FileEntry> fileWriter,
+        CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref _deepDirectoriesProcessed);
+        
+        try
+        {
+            // Process files in current directory first
+            try
+            {
+                var files = Directory.EnumerateFiles(directory);
+                foreach (var file in files)
+                {
+                    if (MatchesFilters(file))
+                    {
+                        await ProcessSingleFileAsync(file, fileWriter, cancellationToken);
+                    }
+                }
+            }
+            catch (UnauthorizedAccessException) { }
+            catch (PathTooLongException) { }
+            catch (IOException) { }
+
+            // Process subdirectories sequentially (no queueing)
+            try
+            {
+                var subdirectories = Directory.EnumerateDirectories(directory);
+                foreach (var subdir in subdirectories)
+                {
+                    // Recursive call for deep processing (not BFS)
+                    await ProcessDeepDirectorySequential(subdir, depth + 1, fileWriter, cancellationToken);
+                }
+            }
+            catch (UnauthorizedAccessException) { }
+            catch (PathTooLongException) { }
+            catch (IOException) { }
+        }
+        catch (Exception)
+        {
+            // Continue processing other directories
+        }
     }
 }
