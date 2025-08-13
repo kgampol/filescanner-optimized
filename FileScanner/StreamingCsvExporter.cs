@@ -1,79 +1,97 @@
+using System.Collections.Concurrent;
 using System.Text;
 
 namespace FileScanner;
 
 /// <summary>
-/// Streaming CSV exporter that writes results as they're found, avoiding memory buildup.
+/// High-performance streaming CSV exporter with duplicate detection and minimal I/O
 /// </summary>
 public class StreamingCsvExporter : IDisposable
 {
     private readonly StreamWriter _writer;
     private readonly object _lock = new object();
+    private readonly ConcurrentDictionary<(long size, string name), int> _duplicateTracker;
+    private readonly List<string> _batch;
     private long _recordCount = 0;
+    private long _duplicateCount = 0;
     private bool _headerWritten = false;
+    private const int BatchSize = 1000;
 
     public StreamingCsvExporter(string filePath)
     {
-        _writer = new StreamWriter(filePath, false, Encoding.UTF8, bufferSize: 8192);
+        _writer = new StreamWriter(filePath, false, Encoding.UTF8, bufferSize: 65536);
+        _duplicateTracker = new ConcurrentDictionary<(long, string), int>();
+        _batch = new List<string>(BatchSize);
     }
 
-    public async Task WriteHeaderAsync()
+    public void WriteHeader()
     {
         if (_headerWritten) return;
         
-        lock (_lock)
-        {
-            if (_headerWritten) return;
-            
-            _writer.WriteLine("FullPath,SizeBytes,LastModified,SizeMB,RelativePath");
-            _headerWritten = true;
-        }
-        
-        await _writer.FlushAsync();
+        _writer.WriteLine("FullPath,SizeBytes,Created,LastModified,SizeMB,DuplicateCount");
+        _headerWritten = true;
     }
 
-    public async Task WriteEntryAsync(FileEntry entry, string rootPath = "")
+    public void WriteEntry(FileEntry entry)
     {
-        await WriteHeaderAsync();
+        if (!_headerWritten) WriteHeader();
+        
+        // Fast duplicate detection using size + filename
+        var key = (entry.SizeBytes, Path.GetFileName(entry.FullPath));
+        var duplicateCount = _duplicateTracker.AddOrUpdate(key, 1, (k, v) => v + 1);
+        
+        if (duplicateCount > 1) _duplicateCount++;
         
         var sizeMB = Math.Round(entry.SizeBytes / (1024.0 * 1024.0), 3);
-        var relativePath = string.IsNullOrEmpty(rootPath) ? entry.FullPath : 
-            Path.GetRelativePath(rootPath, entry.FullPath);
-
-        var line = $"\"{EscapeCsv(entry.FullPath)}\",{entry.SizeBytes},\"{entry.LastModified:yyyy-MM-dd HH:mm:ss}\",{sizeMB},\"{EscapeCsv(relativePath)}\"";
+        var created = entry.CreatedUtc?.ToString("yyyy-MM-dd HH:mm:ss") ?? "";
+        var line = $"\"{EscapeCsv(entry.FullPath)}\",{entry.SizeBytes},\"{created}\",\"{entry.LastModified:yyyy-MM-dd HH:mm:ss}\",{sizeMB},{duplicateCount}";
         
         lock (_lock)
         {
-            _writer.WriteLine(line);
+            _batch.Add(line);
             _recordCount++;
             
-            // Flush every 100 records to ensure data isn't lost
-            if (_recordCount % 100 == 0)
+            // Write batch when full to reduce I/O
+            if (_batch.Count >= BatchSize)
             {
-                _writer.Flush();
+                FlushBatch();
             }
         }
     }
 
-    public async Task WriteEntriesAsync(IAsyncEnumerable<FileEntry> entries, string rootPath = "", 
-        IProgress<long>? progress = null)
+    public async Task WriteEntriesAsync(IAsyncEnumerable<FileEntry> entries, IProgress<long>? progress = null)
     {
-        await WriteHeaderAsync();
+        WriteHeader();
         
         await foreach (var entry in entries)
         {
-            await WriteEntryAsync(entry, rootPath);
-            progress?.Report(_recordCount);
+            WriteEntry(entry);
             
-            // Periodic progress update
+            // Progress update every 1000 records
             if (_recordCount % 1000 == 0)
             {
-                Console.Write($"\rWrote {_recordCount:N0} records to CSV...");
+                progress?.Report(_recordCount);
+                Console.Write($"\rProcessed {_recordCount:N0} files, {_duplicateCount:N0} duplicates...");
             }
         }
         
-        await _writer.FlushAsync();
-        Console.WriteLine($"\nCompleted writing {_recordCount:N0} records to CSV.");
+        // Flush remaining batch
+        lock (_lock)
+        {
+            if (_batch.Count > 0) FlushBatch();
+        }
+        
+        _writer.Flush();
+        Console.WriteLine($"\nCompleted: {_recordCount:N0} files, {_duplicateCount:N0} duplicates");
+    }
+
+    private void FlushBatch()
+    {
+        foreach (var line in _batch)
+        {
+            _writer.WriteLine(line);
+        }
+        _batch.Clear();
     }
 
     private static string EscapeCsv(string value)
@@ -86,9 +104,15 @@ public class StreamingCsvExporter : IDisposable
     }
 
     public long RecordCount => _recordCount;
+    public long DuplicateCount => _duplicateCount;
 
     public void Dispose()
     {
+        // Flush any remaining batch
+        lock (_lock)
+        {
+            if (_batch.Count > 0) FlushBatch();
+        }
         _writer?.Dispose();
     }
 }
